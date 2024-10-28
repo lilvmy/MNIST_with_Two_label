@@ -1,0 +1,183 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from string import ascii_lowercase
+from scipy.ndimage import map_coordinates
+from scipy.ndimage import gaussian_filter
+import torch.utils.data as utils
+import pickle
+
+## fonts
+families = ['cursive', 'Georgia']
+
+def rgba2rgb(rgba, background=(0,0,0)):
+    row, col, ch = rgba.shape
+    if ch == 3:
+        return rgba
+    assert ch == 4, 'RGBA image has 4 channels.'
+
+    rgb = np.zeros((row, col, 3), dtype='float64')
+    r,g,b,a = rgba[:,:,0], rgba[:,:,1], rgba[:,:,2], rgba[:,:,3]
+
+    a = np.asarray(a, dtype='float64') / 255.0
+
+    R, G, B = background
+
+    rgb[:, :, 0] = r * a + (1.0 - a) * R
+    rgb[:, :, 1] = g * a + (1.0 - a) * G
+    rgb[:, :, 2] = b * a + (1.0 - a) * B
+
+    return np.asarray(rgb, dtype='uint8')
+
+# Deformation function
+def elastic_transform(image, alpha, sigma, random_state=None):
+    if random_state is None:
+        random_state = np.random.RandomState(None)
+
+    shape = image.shape
+    dx = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0) * alpha
+    dy = gaussian_filter((random_state.rand(*shape) * 2 - 1), sigma, mode="constant", cval=0) * alpha
+    dz = np.zeros_like(dx)
+
+    x, y, z = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), np.arange(shape[2]))
+    indices = np.reshape(y+dy, (-1, 1)), np.reshape(x+dx, (-1, 1)), np.reshape(z, (-1, 1))
+
+    distored_image = map_coordinates(image, indices, order=1, mode='reflect')
+    return distored_image.reshape(image.shape)
+
+# Recenter function
+def center(data):
+    # Inverse black and white
+    wb_data = np.ones(data.shape) * 255 - data
+
+    # normalize
+    total_sum = np.sum(wb_data)
+    if total_sum == 0:
+        raise ValueError("Sum of wb_data is zero, cannot normalize.")
+    prob_data = wb_data / total_sum
+
+    # marginal distributions
+    dx = np.sum(prob_data, (1, 2))
+    dy = np.sum(prob_data, (0, 2))
+
+    # expected values
+    (X, Y, Z) = prob_data.shape
+    cx = np.sum(dx * np.arange(X))
+    cy = np.sum(dy * np.arange(Y))
+
+    # Check bounds
+    assert cx > X / 4 and cx < 3 * X / 4, f"ERROR: {cx} > {X / 4} and {cx} < {3 * X / 4}"
+    assert cy > Y / 4 and cy < 3 * Y / 4, f"ERROR: {cy} > {Y / 4} and {cy} < {3 * Y / 4}"
+
+    # print('Center', cx, cy)
+
+    x_min = int(round(cx - X / 4))
+    x_max = int(round(cx + X / 4))
+    y_min = int(round(cy - Y / 4))
+    y_max = int(round(cy + Y / 4))
+
+    return data[x_min:x_max, y_min:y_max, :]
+
+# We define a variance parameter for rotation and one for text size
+std_rotation = 10
+std_size = 5 # 5% of reference size, here 50
+
+def build_dataset(dataset_size, verbose=False):
+    dataset_data = []
+    dataset_target_char = []
+    dataset_target_family = []
+    for i in range(dataset_size):
+        if i % int(dataset_size/100) == 0:
+            print(round(i / dataset_size * 100), '%')
+        rotation = np.random.normal(0, std_rotation)
+        size = 50 + np.random.normal(0, std_size)
+        family_idx = np.random.randint(len(families))
+        family = families[family_idx]
+        digit = np.random.randint(10)
+        letter = str(digit)
+
+        fig = plt.figure(figsize=(2,2), dpi=28)
+        fig.text(0.4, 0.4, letter, size=size, rotation=rotation, family=family)
+
+        # Rm axes, draw and get the rgba shape of the letter
+        plt.axis('off')
+        fig.canvas.draw()
+        data = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))
+
+        # Convert to rgb
+        data = rgba2rgb(data)
+
+        # Center the data
+        data = center(data)
+
+        if verbose:
+            plt.show()
+            plt.axis('off')
+            plt.imshow(data)
+            plt.show()
+
+            # Apply an elastic deformation
+        data = elastic_transform(data, alpha=991, sigma=9)
+
+        if verbose:
+            plt.axis('off')
+            plt.imshow(data)
+            plt.show()
+
+        # Free memory space
+        plt.close(fig)
+
+        # Append data to the datasets
+        target_char = np.array([digit])
+        target_family = np.array([family_idx])
+        dataset_data.append(data[:, :, 0])
+        dataset_target_char.append(target_char)
+        dataset_target_family.append(target_family)
+
+    return dataset_data, dataset_target_char, dataset_target_family
+
+
+def save_dataset(info, data, target_char, target_family):
+    with open('./data/character_dataset_{}.pkl'.format(info), 'wb') as output:
+        dataset = data, target_char, target_family
+        pickle.dump(dataset, output, pickle.HIGHEST_PROTOCOL)
+
+
+# WE BUILD 10000 PER 10000 FOR MEMORY PURPOSE
+# WARNING: This step takes time, and you may need to restart your notebook for memory purposes.
+# If so, change the following range to avoid the loops already processed
+for i in range(6):
+    print(f"Train{i}")
+    train_data, train_target_char, train_target_family = build_dataset(10000)
+    save_dataset(f"train{i}", train_data, train_target_char, train_target_family)
+
+print("Test")
+test_data, test_target_char, test_target_family = build_dataset(10000)
+save_dataset("test", test_data, test_target_char, test_target_family)
+
+import sys, os
+sys.path.insert(1, os.path.realpath(os.path.pardir))
+import random, math
+import util
+
+data = util.load_data()
+train_data, train_target_char, train_target_family, test_data, test_target_char, test_target_family = data
+
+
+def show_examples(data, target_char, target_family, n_examples=20):
+    n_rows = math.ceil(n_examples / 5)
+    plt.figure(figsize=(14, 3 * n_rows))
+    for i in range(n_examples):
+        ax = plt.subplot(n_rows, 5, i + 1)
+        idx = random.randint(0, len(data))
+        image = 255 - data[idx]
+        letter = str([target_char[idx][0]])
+        family = families[target_family[idx][0]]
+        ax.set_title(f"{letter} ({family})")
+        plt.axis('off')
+        ax.imshow(image, cmap='gist_gray')
+    plt.show()
+
+
+show_examples(test_data, test_target_char, test_target_family)
+
